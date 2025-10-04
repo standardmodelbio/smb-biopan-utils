@@ -9,6 +9,8 @@ import torch
 # Medical imaging utilities
 # ==========================
 
+CT_DEFAULT_SPATIAL_SIZE = (320, 320, 176)
+CT_DEFAULT_PIXDIM = (1.0, 1.0, 1.5)
 CT_DEFAULT_A_MIN = -1000
 CT_DEFAULT_A_MAX = 1000
 CT_DEFAULT_B_MIN = 0.0
@@ -25,8 +27,8 @@ def _require_monai() -> None:
 
 
 def get_ct_transforms(
-    spatial_size: tuple[int, int, int] = (384, 384, 256),
-    pixdim: tuple[float, float, float] = (1.0, 1.0, 1.5),
+    spatial_size: tuple[int, int, int] = CT_DEFAULT_SPATIAL_SIZE,
+    pixdim: tuple[float, float, float] = CT_DEFAULT_PIXDIM,
     a_min: float = CT_DEFAULT_A_MIN,
     a_max: float = CT_DEFAULT_A_MAX,
     b_min: float = CT_DEFAULT_B_MIN,
@@ -57,7 +59,7 @@ def get_ct_transforms(
             MapTransform.__init__(self, keys, allow_missing_keys)
 
         def __call__(self, data):
-            data["image"] = data["image"].permute(3, 0, 1, 2)
+            data["image"] = data["image"].permute(0, 3, 1, 2)
             return data
 
     ct_transforms = Compose(
@@ -69,7 +71,7 @@ def get_ct_transforms(
             ScaleIntensityRanged(keys=["image"], a_min=a_min, a_max=a_max, b_min=b_min, b_max=b_max, clip=True),
             SpatialPadd(keys=["image"], spatial_size=list(spatial_size)),
             CenterSpatialCropd(roi_size=list(spatial_size), keys=["image"]),
-            ToTensord(keys=["image"]),
+            ToTensord(keys=["image"], track_meta=False),
             PermuteImage(),
         ]
     )
@@ -78,8 +80,8 @@ def get_ct_transforms(
 
 def preprocess_ct_nifti(
     nifti_path: str,
-    spatial_size: tuple[int, int, int] = (384, 384, 256),
-    pixdim: tuple[float, float, float] = (1.0, 1.0, 1.5),
+    spatial_size: tuple[int, int, int] = CT_DEFAULT_SPATIAL_SIZE,
+    pixdim: tuple[float, float, float] = CT_DEFAULT_PIXDIM,
     a_min: float = CT_DEFAULT_A_MIN,
     a_max: float = CT_DEFAULT_A_MAX,
     b_min: float = CT_DEFAULT_B_MIN,
@@ -95,7 +97,7 @@ def preprocess_ct_nifti(
     if volume_dc_hw.dim() != 4:
         raise ValueError(f"Expected 4D tensor (D, C, H, W), got shape {tuple(volume_dc_hw.shape)}")
     # Add batch dimension -> (B, D, C, H, W)
-    return volume_dc_hw.unsqueeze(0)
+    return volume_dc_hw
 
 
 def fetch_medical_volume(ele: dict) -> torch.Tensor:
@@ -105,13 +107,13 @@ def fetch_medical_volume(ele: dict) -> torch.Tensor:
       - "nifti_path" or "image": path to .nii/.nii.gz CT volume
       - Optional overrides: spatial_size, pixdim, a_min, a_max, b_min, b_max
 
-    Returns: torch.Tensor with shape [1, D, C, H, W]
+    Returns: torch.Tensor with shape [C, D, H, W]
     """
     nifti_path = ele.get("nifti_path") or ele.get("image")
     if not isinstance(nifti_path, str):
         raise ValueError("fetch_medical_volume expects 'nifti_path' or 'image' string path to a NIfTI file")
-    spatial_size = tuple(ele.get("spatial_size", (384, 384, 256)))
-    pixdim = tuple(ele.get("pixdim", (1.0, 1.0, 1.5)))
+    spatial_size = tuple(ele.get("spatial_size", CT_DEFAULT_SPATIAL_SIZE))
+    pixdim = tuple(ele.get("pixdim", CT_DEFAULT_PIXDIM))
     a_min = float(ele.get("a_min", CT_DEFAULT_A_MIN))
     a_max = float(ele.get("a_max", CT_DEFAULT_A_MAX))
     b_min = float(ele.get("b_min", CT_DEFAULT_B_MIN))
@@ -158,7 +160,6 @@ def process_imaging_info(
     Returns a list of tensors with shape [1, D, C, H, W] or None if no entries.
     """
     imaging_infos = extract_imaging_info(conversations)
-    print(imaging_infos)
     volume_inputs: list[torch.Tensor] = []
     for info in imaging_infos:
         volume_inputs.append(fetch_medical_volume(info))
