@@ -109,5 +109,5 @@ if __name__ == "__main__":
     # print(processor.batch_decode(inputs["input_ids"], skip_special_tokens=False, clean_up_tokenization_spaces=False))
 
     ## generate
-    outputs = model(**inputs)
+    outputs = model(**inputs, output_router_logits=True)
     print(outputs)

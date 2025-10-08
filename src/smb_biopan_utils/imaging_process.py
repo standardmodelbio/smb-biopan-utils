@@ -165,4 +165,4 @@ def process_imaging_info(
         volume_inputs.append(fetch_medical_volume(info))
     if len(volume_inputs) == 0:
         return None
-    return volume_inputs
+    return torch.stack(volume_inputs)
