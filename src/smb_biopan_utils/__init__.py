@@ -8,9 +8,9 @@ import torch
 from .imaging_process import extract_imaging_info, fetch_medical_volume, process_imaging_info
 
 
-def process_mm_info(conversations: list[dict] | list[list[dict]]) -> list[torch.Tensor] | None:
-    imaging = process_imaging_info(conversations)
-    return imaging
+def process_mm_info(conversations: list[dict] | list[list[dict]]) -> tuple[torch.Tensor, torch.Tensor] | None:
+    imaging, grid_thw = process_imaging_info(conversations)
+    return imaging, grid_thw
 
 
 __all__ = ["fetch_medical_volume", "extract_imaging_info", "process_imaging_info", "process_mm_info"]

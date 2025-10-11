@@ -18,11 +18,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from transformers.configuration_utils import PreTrainedConfig
+from transformers.configuration_utils import PretrainedConfig
 from transformers.modeling_rope_utils import rope_config_validation
 
 
-class Qwen3VLMoeTextConfig(PreTrainedConfig):
+class Qwen3VLMoeTextConfig(PretrainedConfig):
     r"""
     This is the configuration class to store the configuration of a [`Qwen3VLMoeTextModel`]. It is used to instantiate a
     Qwen3-VL-MOE model according to the specified arguments, defining the model architecture. Instantiating a configuration
@@ -222,7 +222,7 @@ class Qwen3VLMoeTextConfig(PreTrainedConfig):
         super().__init__(tie_word_embeddings=tie_word_embeddings, **kwargs)
 
 
-class Qwen3VLMoeVisionConfig(PreTrainedConfig):
+class Qwen3VLMoeVisionConfig(PretrainedConfig):
     model_type = "qwen3_vl_moe"
     base_config_key = "vision_config"
 
@@ -260,7 +260,7 @@ class Qwen3VLMoeVisionConfig(PreTrainedConfig):
         self.deepstack_visual_indexes = deepstack_visual_indexes
 
 
-class Qwen3VLMoeConfig(PreTrainedConfig):
+class Qwen3VLMoeConfig(PretrainedConfig):
     r"""
     This is the configuration class to store the configuration of a [`Qwen3VLMoeModel`]. It is used to instantiate a
     Qwen3-VL-MOE model according to the specified arguments, defining the model architecture. Instantiating a configuration

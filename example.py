@@ -10,19 +10,12 @@ if __name__ == "__main__":
         {
             "role": "user",
             "content": [
-                {
-                    "type": "image",
-                    "image": "/root/data/PE1677ce5.nii.gz"
-                },
-                {
-                    "type": "text",
-                    "text": "What the heck is going on here?"
-                }
-            ]
+                {"type": "image", "image": "/workspace/data/PE1677ce5.nii.gz"},
+                {"type": "text", "text": "What the heck is going on here?"},
+            ],
         }
     ]
     images = process_mm_info(messages)
-    images = torch.stack(images)
     print(images.shape)
 
     # initialize model
@@ -50,18 +43,10 @@ if __name__ == "__main__":
             "num_hidden_layers": 2,
             "num_key_value_heads": 4,
             "rms_norm_eps": 1e-06,
-            "rope_scaling": {
-            "mrope_interleaved": True,
-            "mrope_section": [
-                2,
-                2,
-                2
-            ],
-            "rope_type": "default"
-            },
+            "rope_scaling": {"mrope_interleaved": True, "mrope_section": [2, 2, 2], "rope_type": "default"},
             "rope_theta": 5000000,
             "use_cache": True,
-            "vocab_size": 151936
+            "vocab_size": 151936,
         },
         vision_config={
             "deepstack_visual_indexes": [
@@ -79,7 +64,7 @@ if __name__ == "__main__":
             "out_hidden_size": 120,
             "patch_size": 16,
             "spatial_merge_size": 2,
-            "temporal_patch_size": 16
+            "temporal_patch_size": 16,
         },
         image_token_id=151655,
         video_token_id=151656,
@@ -90,7 +75,7 @@ if __name__ == "__main__":
     model = Qwen3VLMoeForConditionalGeneration(config).to("cuda")
 
     # initialize processor
-    processor = AutoProcessor.from_pretrained("standardmodelbio/SMB-RAD-v1", trust_remote_code=True)
+    processor = AutoProcessor.from_pretrained("standardmodelbio/SMB-30B-A3B-v1", trust_remote_code=True)
 
     # Preparation for inference
     inputs = processor.apply_chat_template(
@@ -104,10 +89,19 @@ if __name__ == "__main__":
     for key, value in inputs.items():
         print(key, value.shape)
 
+    # run vision encoder
+    hidden_states, deepstack_feature_lists = model.model.visual(
+        inputs["pixel_values"], grid_thw=inputs["image_grid_thw"]
+    )
+    print(hidden_states.shape)
+    for deepstack_feature in deepstack_feature_lists:
+        print(deepstack_feature.shape)
+    # print(deepstack_feature_lists)
+
     ## decode input ids
     # print(inputs["input_ids"])
     # print(processor.batch_decode(inputs["input_ids"], skip_special_tokens=False, clean_up_tokenization_spaces=False))
 
     ## generate
-    outputs = model(**inputs, output_router_logits=True)
-    print(outputs)
+    # outputs = model(**inputs, output_router_logits=True)
+    # print(outputs)

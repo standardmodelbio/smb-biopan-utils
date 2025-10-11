@@ -151,7 +151,16 @@ class Qwen3VLProcessor(ProcessorMixin):
                 image_inputs = {"pixel_values": images}
                 patch_size = self.image_processor.patch_size
                 temporal_patch_size = self.image_processor.temporal_patch_size
-                image_grid_thw = [np.array([image.shape[1]//temporal_patch_size, image.shape[2]//patch_size, image.shape[3]//patch_size]) for image in images]
+                image_grid_thw = [
+                    np.array(
+                        [
+                            image.shape[1] // temporal_patch_size,
+                            image.shape[2] // patch_size,
+                            image.shape[3] // patch_size,
+                        ]
+                    )
+                    for image in images
+                ]
                 image_inputs["image_grid_thw"] = image_grid_thw
             else:
                 raise ValueError(f"Invalid dimension for images: {self.image_processor.dim}")

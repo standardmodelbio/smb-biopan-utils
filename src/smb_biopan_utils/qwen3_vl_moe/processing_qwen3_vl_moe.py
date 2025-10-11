@@ -25,7 +25,14 @@ import numpy as np
 
 from transformers.feature_extraction_utils import BatchFeature
 from transformers.image_utils import ImageInput
-from transformers.processing_utils import ImagesKwargs, MultiModalData, ProcessingKwargs, ProcessorMixin, Unpack, VideosKwargs
+from transformers.processing_utils import (
+    ImagesKwargs,
+    MultiModalData,
+    ProcessingKwargs,
+    ProcessorMixin,
+    Unpack,
+    VideosKwargs,
+)
 from transformers.tokenization_utils_base import PreTokenizedInput, TextInput
 from transformers.utils import logging
 from transformers.video_utils import VideoInput
@@ -166,7 +173,16 @@ class Qwen3VLProcessor(ProcessorMixin):
                 image_inputs = {"pixel_values": images}
                 patch_size = self.image_processor.patch_size
                 temporal_patch_size = self.image_processor.temporal_patch_size
-                image_grid_thw = [np.array([image.shape[1]//temporal_patch_size, image.shape[2]//patch_size, image.shape[3]//patch_size]) for image in images]
+                image_grid_thw = [
+                    np.array(
+                        [
+                            image.shape[1] // temporal_patch_size,
+                            image.shape[2] // patch_size,
+                            image.shape[3] // patch_size,
+                        ]
+                    )
+                    for image in images
+                ]
                 image_inputs["image_grid_thw"] = image_grid_thw
             else:
                 raise ValueError(f"Invalid dimension for images: {self.image_processor.dim}")

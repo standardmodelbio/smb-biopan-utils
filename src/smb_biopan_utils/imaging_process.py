@@ -15,6 +15,8 @@ CT_DEFAULT_A_MIN = -1000
 CT_DEFAULT_A_MAX = 1000
 CT_DEFAULT_B_MIN = 0.0
 CT_DEFAULT_B_MAX = 1.0
+DEPTH_PATCH_SIZE = 16
+PATCH_SIZE = 16
 
 
 def _require_monai() -> None:
@@ -86,28 +88,56 @@ def preprocess_ct_nifti(
     a_max: float = CT_DEFAULT_A_MAX,
     b_min: float = CT_DEFAULT_B_MIN,
     b_max: float = CT_DEFAULT_B_MAX,
-) -> torch.Tensor:
-    """Load and preprocess a CT NIfTI file to VJEPA2-ready shape [1, D, C, H, W]."""
+    depth_patch_size: int = 16,
+    patch_size: int = 16,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Load and preprocess a CT NIfTI file to VJEPA2-ready shape [1, C, D, H, W]."""
     transforms = get_ct_transforms(
         spatial_size=spatial_size, pixdim=pixdim, a_min=a_min, a_max=a_max, b_min=b_min, b_max=b_max
     )
     data_dict = {"image": nifti_path}
     transformed = transforms(data_dict)
-    volume_dc_hw = transformed["image"]  # (D, C, H, W)
+    volume_dc_hw = transformed["image"]  # (C, D, H, W)
     if volume_dc_hw.dim() != 4:
-        raise ValueError(f"Expected 4D tensor (D, C, H, W), got shape {tuple(volume_dc_hw.shape)}")
-    # Add batch dimension -> (B, D, C, H, W)
-    return volume_dc_hw
+        raise ValueError(f"Expected 4D tensor (C, D, H, W), got shape {tuple(volume_dc_hw.shape)}")
+
+    # get grid_thw
+    grid_thw = torch.tensor(
+        [
+            volume_dc_hw.shape[1] // depth_patch_size,
+            volume_dc_hw.shape[2] // patch_size,
+            volume_dc_hw.shape[3] // patch_size,
+        ]
+    )
+
+    # 1. Chain unfold calls for a cleaner look
+    patches = (
+        volume_dc_hw.unfold(1, depth_patch_size, depth_patch_size)
+        .unfold(2, patch_size, patch_size)
+        .unfold(3, patch_size, patch_size)
+    )
+
+    # 2. Permute to group grid dimensions and patch dimensions separately
+    # Initial shape: (C, nD, nH, nW, d_p, p, p)
+    # Target shape:  (nD, nH, nW, C, d_p, p, p)
+    patches = patches.permute(1, 2, 3, 0, 4, 5, 6)
+
+    # 3. Explicitly create a contiguous tensor, then flatten
+    # This is the key optimization step.
+    # The first three dimensions (nD, nH, nW) are flattened into `total_patches`.
+    # The last four dimensions (C, d_p, p, p) are flattened into the feature dimension.
+    patches = patches.contiguous().view(-1, volume_dc_hw.shape[0] * depth_patch_size * patch_size * patch_size)
+    return patches, grid_thw
 
 
-def fetch_medical_volume(ele: dict) -> torch.Tensor:
+def fetch_medical_volume(ele: dict) -> tuple[torch.Tensor, torch.Tensor]:
     """Convenience wrapper to preprocess medical volumes.
 
     Supported keys:
       - "nifti_path" or "image": path to .nii/.nii.gz CT volume
       - Optional overrides: spatial_size, pixdim, a_min, a_max, b_min, b_max
 
-    Returns: torch.Tensor with shape [C, D, H, W]
+    Returns: tuple[torch.Tensor, torch.Tensor]
     """
     nifti_path = ele.get("nifti_path") or ele.get("image")
     if not isinstance(nifti_path, str):
@@ -118,7 +148,9 @@ def fetch_medical_volume(ele: dict) -> torch.Tensor:
     a_max = float(ele.get("a_max", CT_DEFAULT_A_MAX))
     b_min = float(ele.get("b_min", CT_DEFAULT_B_MIN))
     b_max = float(ele.get("b_max", CT_DEFAULT_B_MAX))
-    return preprocess_ct_nifti(
+    depth_patch_size = int(ele.get("depth_patch_size", DEPTH_PATCH_SIZE))
+    patch_size = int(ele.get("patch_size", PATCH_SIZE))
+    patches, grid_thw = preprocess_ct_nifti(
         nifti_path=nifti_path,
         spatial_size=spatial_size,
         pixdim=pixdim,
@@ -126,7 +158,10 @@ def fetch_medical_volume(ele: dict) -> torch.Tensor:
         a_max=a_max,
         b_min=b_min,
         b_max=b_max,
+        depth_patch_size=depth_patch_size,
+        patch_size=patch_size,
     )
+    return patches, grid_thw
 
 
 def extract_imaging_info(conversations: list[dict] | list[list[dict]]) -> list[dict]:
@@ -154,15 +189,17 @@ def extract_imaging_info(conversations: list[dict] | list[list[dict]]) -> list[d
 
 def process_imaging_info(
     conversations: list[dict] | list[list[dict]],
-) -> list[torch.Tensor] | None:
+) -> tuple[torch.Tensor, torch.Tensor] | None:
     """Process medical imaging info into preprocessed tensors.
 
     Returns a list of tensors with shape [1, D, C, H, W] or None if no entries.
     """
     imaging_infos = extract_imaging_info(conversations)
     volume_inputs: list[torch.Tensor] = []
+    grid_thws: list[torch.Tensor] = []
     for info in imaging_infos:
-        volume_inputs.append(fetch_medical_volume(info))
+        volume_inputs.append(fetch_medical_volume(info)[0])
+        grid_thws.append(fetch_medical_volume(info)[1])
     if len(volume_inputs) == 0:
         return None
-    return torch.stack(volume_inputs)
+    return torch.cat(volume_inputs, dim=0), torch.stack(grid_thws)

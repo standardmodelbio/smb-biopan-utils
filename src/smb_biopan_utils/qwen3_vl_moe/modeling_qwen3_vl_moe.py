@@ -422,7 +422,9 @@ class Qwen3VLMoeVisionPatchEmbed(nn.Module):
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         target_dtype = self.proj.weight.dtype
-        hidden_states = self.proj(hidden_states.to(dtype=target_dtype)).flatten(2).transpose(1, 2).view(-1, self.embed_dim)
+        hidden_states = (
+            self.proj(hidden_states.to(dtype=target_dtype)).flatten(2).transpose(1, 2).view(-1, self.embed_dim)
+        )
         return hidden_states
 
 
@@ -451,7 +453,9 @@ class Qwen3VLMoeVisionPatchMerger(nn.Module):
         self.linear_fc2 = nn.Linear(self.hidden_size, config.out_hidden_size)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.norm(x.contiguous().view(-1, self.hidden_size) if self.use_postshuffle_norm else x).view(-1, self.hidden_size)
+        x = self.norm(x.contiguous().view(-1, self.hidden_size) if self.use_postshuffle_norm else x).view(
+            -1, self.hidden_size
+        )
         x = self.linear_fc2(self.act_fn(self.linear_fc1(x)))
         return x
 
