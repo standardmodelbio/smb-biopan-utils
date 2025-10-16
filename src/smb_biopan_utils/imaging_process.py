@@ -66,6 +66,9 @@ def get_ct_transforms(
             MapTransform.__init__(self, keys, allow_missing_keys)
 
         def __call__(self, data):
+            # ensure the image only has one channel
+            if data["image"].shape[0] != 1:
+                data["image"] = data["image"][0:1]
             data["image"] = data["image"].permute(0, 3, 1, 2)
             return data
 
@@ -85,7 +88,7 @@ def get_ct_transforms(
     return ct_transforms
 
 
-def download_nifti_file(nifti_path: str, save_dir: str = "/tmp") -> str:
+def download_nifti_file(nifti_path: str, save_dir: str = "/home/user/tmp/") -> str:
     """Download a NIfTI file from a s3 or r2 object to local temp directory."""
     # get the bucket and object name from the nifti path
     # Parse S3/R2 URL to extract bucket and object key
@@ -100,8 +103,12 @@ def download_nifti_file(nifti_path: str, save_dir: str = "/tmp") -> str:
         raise ValueError(f"Invalid S3/R2 path format: {nifti_path}")
 
     # create s3 client
-    session = boto3.Session(profile_name="smb-dev")
+    session = boto3.Session(profile_name="smb-data")
     s3 = session.client("s3")
+
+    # create save directory if it does not exist
+    if not os.path.exists(save_dir):
+        os.makedirs(save_dir)
 
     # create temp directory and get local file path
     local_path = os.path.join(save_dir, os.path.basename(object_name))
