@@ -3,7 +3,12 @@
 # Copyright © 2025 Standard Model Biomedicine, Inc. <zach@standardmodel.bio>
 #
 # Distributed under terms of the Apache License 2.0 license.
+import os
+import tempfile
+
+import boto3
 import torch
+
 
 # ==========================
 # Medical imaging utilities
@@ -80,6 +85,32 @@ def get_ct_transforms(
     return ct_transforms
 
 
+def download_nifti_file(nifti_path: str, save_dir: str = "/tmp") -> str:
+    """Download a NIfTI file from a s3 or r2 object to local temp directory."""
+    # get the bucket and object name from the nifti path
+    # Parse S3/R2 URL to extract bucket and object key
+    if nifti_path.startswith("s3://"):
+        # Remove s3:// prefix and split into bucket and object key
+        path_without_prefix = nifti_path[5:]  # Remove "s3://"
+        bucket, object_name = path_without_prefix.split("/", 1)
+    elif "/" in nifti_path:
+        # Handle other URL formats or direct bucket/object paths
+        bucket, object_name = nifti_path.split("/", 1)
+    else:
+        raise ValueError(f"Invalid S3/R2 path format: {nifti_path}")
+
+    # create s3 client
+    session = boto3.Session(profile_name="smb-dev")
+    s3 = session.client("s3")
+
+    # create temp directory and get local file path
+    local_path = os.path.join(save_dir, os.path.basename(object_name))
+
+    # download the nifti file from the s3 or r2 object to temp directory
+    s3.download_file(bucket, object_name, local_path)
+    return local_path
+
+
 def preprocess_ct_nifti(
     nifti_path: str,
     spatial_size: tuple[int, int, int] = CT_DEFAULT_SPATIAL_SIZE,
@@ -150,17 +181,34 @@ def fetch_medical_volume(ele: dict) -> tuple[torch.Tensor, torch.Tensor]:
     b_max = float(ele.get("b_max", CT_DEFAULT_B_MAX))
     depth_patch_size = int(ele.get("depth_patch_size", DEPTH_PATCH_SIZE))
     patch_size = int(ele.get("patch_size", PATCH_SIZE))
-    patches, grid_thw = preprocess_ct_nifti(
-        nifti_path=nifti_path,
-        spatial_size=spatial_size,
-        pixdim=pixdim,
-        a_min=a_min,
-        a_max=a_max,
-        b_min=b_min,
-        b_max=b_max,
-        depth_patch_size=depth_patch_size,
-        patch_size=patch_size,
-    )
+
+    # download nifti file if it is not a local path
+    if not os.path.exists(nifti_path):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            nifti_path = download_nifti_file(nifti_path, temp_dir)
+            patches, grid_thw = preprocess_ct_nifti(
+                nifti_path=nifti_path,
+                spatial_size=spatial_size,
+                pixdim=pixdim,
+                a_min=a_min,
+                a_max=a_max,
+                b_min=b_min,
+                b_max=b_max,
+                depth_patch_size=depth_patch_size,
+                patch_size=patch_size,
+            )
+    else:
+        patches, grid_thw = preprocess_ct_nifti(
+            nifti_path=nifti_path,
+            spatial_size=spatial_size,
+            pixdim=pixdim,
+            a_min=a_min,
+            a_max=a_max,
+            b_min=b_min,
+            b_max=b_max,
+            depth_patch_size=depth_patch_size,
+            patch_size=patch_size,
+        )
     return patches, grid_thw
 
 
@@ -198,8 +246,9 @@ def process_imaging_info(
     volume_inputs: list[torch.Tensor] = []
     grid_thws: list[torch.Tensor] = []
     for info in imaging_infos:
-        volume_inputs.append(fetch_medical_volume(info)[0])
-        grid_thws.append(fetch_medical_volume(info)[1])
+        volume, grid_thw = fetch_medical_volume(info)
+        volume_inputs.append(volume)
+        grid_thws.append(grid_thw)
     if len(volume_inputs) == 0:
         return None
     return torch.cat(volume_inputs, dim=0), torch.stack(grid_thws)
