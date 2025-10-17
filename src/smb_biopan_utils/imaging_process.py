@@ -8,13 +8,16 @@ import tempfile
 
 import boto3
 import torch
+from dotenv import load_dotenv
 
+
+load_dotenv()
 
 # ==========================
 # Medical imaging utilities
 # ==========================
 
-CT_DEFAULT_SPATIAL_SIZE = (320, 320, 176)
+CT_DEFAULT_SPATIAL_SIZE = (384, 384, 192)
 CT_DEFAULT_PIXDIM = (1.0, 1.0, 1.5)
 CT_DEFAULT_A_MIN = -1000
 CT_DEFAULT_A_MAX = 1000
@@ -36,6 +39,7 @@ def _require_monai() -> None:
 def get_ct_transforms(
     spatial_size: tuple[int, int, int] = CT_DEFAULT_SPATIAL_SIZE,
     pixdim: tuple[float, float, float] = CT_DEFAULT_PIXDIM,
+    patch_size: int = PATCH_SIZE,
     a_min: float = CT_DEFAULT_A_MIN,
     a_max: float = CT_DEFAULT_A_MAX,
     b_min: float = CT_DEFAULT_B_MIN,
@@ -43,19 +47,19 @@ def get_ct_transforms(
 ):
     """Create a MONAI Compose for CT NIfTI preprocessing.
 
-    Returns a transform that produces a tensor with shape (D, C, H, W), where C=1.
+    Returns a transform that produces a tensor with shape (C, D, H, W), where C=1.
     """
     _require_monai()
     from monai.transforms import (
         CenterSpatialCropd,
         Compose,
+        DivisiblePadd,
         EnsureChannelFirstd,
         LoadImaged,
         MapTransform,
         Orientationd,
         ScaleIntensityRanged,
         Spacingd,
-        SpatialPadd,
         ToTensord,
     )
 
@@ -79,8 +83,8 @@ def get_ct_transforms(
             Orientationd(keys=["image"], axcodes="RAS"),
             Spacingd(keys=["image"], pixdim=pixdim, mode=("bilinear")),
             ScaleIntensityRanged(keys=["image"], a_min=a_min, a_max=a_max, b_min=b_min, b_max=b_max, clip=True),
-            SpatialPadd(keys=["image"], spatial_size=list(spatial_size)),
-            CenterSpatialCropd(roi_size=list(spatial_size), keys=["image"]),
+            CenterSpatialCropd(keys=["image"], roi_size=list(spatial_size)),
+            DivisiblePadd(keys=["image"], k=patch_size * 2),
             ToTensord(keys=["image"], track_meta=False),
             PermuteImage(),
         ]
@@ -92,18 +96,15 @@ def download_nifti_file(nifti_path: str, save_dir: str = "/home/user/tmp/") -> s
     """Download a NIfTI file from a s3 or r2 object to local temp directory."""
     # get the bucket and object name from the nifti path
     # Parse S3/R2 URL to extract bucket and object key
-    if nifti_path.startswith("s3://"):
+    if nifti_path.startswith("s3://") or nifti_path.startswith("r2://"):
         # Remove s3:// prefix and split into bucket and object key
         path_without_prefix = nifti_path[5:]  # Remove "s3://"
         bucket, object_name = path_without_prefix.split("/", 1)
-    elif "/" in nifti_path:
-        # Handle other URL formats or direct bucket/object paths
-        bucket, object_name = nifti_path.split("/", 1)
     else:
         raise ValueError(f"Invalid S3/R2 path format: {nifti_path}")
 
     # create s3 client
-    session = boto3.Session(profile_name="smb-data")
+    session = boto3.Session()
     s3 = session.client("s3")
 
     # create save directory if it does not exist
