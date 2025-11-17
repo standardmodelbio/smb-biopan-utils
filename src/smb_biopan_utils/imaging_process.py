@@ -92,7 +92,7 @@ def get_ct_transforms(
     return ct_transforms
 
 
-def download_nifti_file(nifti_path: str, save_dir: str = "/home/user/tmp/") -> str:
+def download_nifti_file(nifti_path: str, save_dir: str = "./tmp/") -> str:
     """Download a NIfTI file from a s3 or r2 object to local temp directory."""
     # get the bucket and object name from the nifti path
     # Parse S3/R2 URL to extract bucket and object key

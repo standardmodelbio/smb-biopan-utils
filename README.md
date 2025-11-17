@@ -1,6 +1,6 @@
 # smb-biopan-utils
 
-SMB-BioPAN Utils contains a set of helper functions for processing and integrating arbitary biomedical modality with SMB's Foundational Model. As of now, it supports CT and ECG (coming soon) data processing.
+SMB-BioPAN Utils contains a set of helper functions for processing and integrating arbitrary biomedical modality with SMB's Foundational Model. It supports CT imaging, ECG (coming soon), and EHR data processing.
 
 ## Install
 
@@ -9,6 +9,94 @@ pip install smb-biopan-utils
 ```
 
 ## Usage
+
+### EHR Data Processing
+
+Process structured EHR data in MEDS format for model inference. The formatter groups events by code, shows values chronologically, and supports both date-based grouping and time-binned organization.
+
+#### Basic Usage - Date Grouping
+
+```python
+import pandas as pd
+from smb_biopan_utils import process_ehr_info
+
+# Load MEDS format data
+df = pd.read_parquet("patient_data.parquet")
+
+# Format for a single patient with date grouping
+text = process_ehr_info(
+    df,
+    subject_id="patient_123",
+    end_time=pd.Timestamp("2024-01-01")
+)
+
+print(text)
+# Output:
+# <demographics>
+# Birth: 1980-05-15
+# </demographics>
+#
+# [2024-01-01]
+# <conditions>
+# Hypertension
+# Diabetes Type 2
+# </conditions>
+# <measurements>
+# Glucose (mg/dL): 95.00, 102.00, 98.00
+# </measurements>
+```
+
+#### Advanced Usage - Time Bins
+
+Organize events into time bins going backwards from an anchor date (most recent first):
+
+```python
+# Format with time bins (most recent events first)
+text = process_ehr_info(
+    df,
+    subject_id="patient_123",
+    end_time=pd.Timestamp("2024-01-01"),  # anchor point
+    time_bins=[(90, 30), (30, 7), (7, 0)],  # days back: (start, end)
+)
+
+# Output shows bins with absolute dates:
+# <timespan>2023-12-25 - 2024-01-01</timespan>  # Last 7 days
+# <conditions>...</conditions>
+#
+# <timespan>2023-12-04 - 2023-12-25</timespan>  # 7-30 days ago
+# <measurements>...</measurements>
+#
+# <timespan>2023-10-02 - 2023-12-04</timespan>  # 30-90 days ago
+# <observations>...</observations>
+```
+
+#### With Imaging Data
+
+```python
+# Include imaging paths for multimodal models
+result = process_ehr_info(
+    df,
+    subject_id="patient_123",
+    include_imaging=True
+)
+
+# Returns dict with text and image paths
+print(result["text"])  # Formatted text with <image> tokens
+print(result["images"])  # List of CT/imaging file paths
+```
+
+#### Parameters
+
+- `df`: DataFrame in MEDS format
+- `subject_id`: Patient ID to filter (optional)
+- `omop_table_name`: Column containing table/event types (default: "table")
+- `code_column`: Column containing event codes (default: "code" or "code_description")
+- `start_time`: Absolute lower bound for events (optional)
+- `end_time`: Upper bound or anchor point for time bins (optional)
+- `include_demographics`: Include demographics section (default: True)
+- `time_bins`: List of (days_back_start, days_back_end) tuples (optional)
+- `include_imaging`: Return dict with text and imaging paths (default: False)
+
 
 ### SMB-Vision Series
 
