@@ -5,7 +5,7 @@ SMB-BioPAN Utils contains a set of helper functions for processing and integrati
 ## Install
 
 ```bash
-pip install smb-biopan-utils
+uv pip install "git+https://github.com/standardmodelbio/smb-biopan-utils"
 ```
 
 ## Usage
