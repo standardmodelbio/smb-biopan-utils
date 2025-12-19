@@ -8,6 +8,7 @@ import torch
 
 from .ehr_process import process_ehr_info
 from .imaging_process import extract_imaging_info, fetch_medical_volume, process_imaging_info
+from .imaging_text_pairs import create_imaging_text_pairs
 
 
 def process_mm_info(conversations: list[dict] | list[list[dict]]) -> tuple[torch.Tensor, torch.Tensor] | None:
@@ -21,4 +22,5 @@ __all__ = [
     "process_imaging_info",
     "process_mm_info",
     "process_ehr_info",
+    "create_imaging_text_pairs",
 ]
