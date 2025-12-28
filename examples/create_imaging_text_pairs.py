@@ -4,8 +4,8 @@ from smb_biopan_utils import create_imaging_text_pairs
 
 
 if __name__ == "__main__":
-    file_path = "data/final_impressions.csv"
-    image_url = "s3://smb-data-us-east-2/asset-inspect/inspect2/CTPA"
+    file_path = "/path/to/text"
+    image_url = "/path/to/images"
     df = pd.read_csv(file_path)
     df["image_url"] = df["impression_id"].apply(lambda x: f"{image_url}/{x}.nii.gz")
 
