@@ -4,36 +4,127 @@
 #
 # Distributed under terms of the Apache License 2.0 license.
 import os
+import tarfile
 import tempfile
 
 import boto3
 import torch
+from botocore.config import Config
 from dotenv import load_dotenv
 
 
 load_dotenv()
 
+# CONFIGURATION
+MAX_WORKERS = 50  # Increased since we are IO-bound
+TIMEOUT = 5  # Seconds to wait for a HEAD request
+
 # ==========================
 # Medical imaging utilities
 # ==========================
 
-CT_DEFAULT_SPATIAL_SIZE = (384, 384, 192)
-CT_DEFAULT_PIXDIM = (1.0, 1.0, 1.5)
+# CT Defines
+CT_DEFAULT_SPATIAL_SIZE = (416, 416, 192)
+CT_DEFAULT_PIXDIM = (1.0, 1.0, 2.0)
 CT_DEFAULT_A_MIN = -1000
 CT_DEFAULT_A_MAX = 1000
 CT_DEFAULT_B_MIN = 0.0
 CT_DEFAULT_B_MAX = 1.0
+
+# MRI Defines (Percentile scaling default)
+MRI_DEFAULT_SPATIAL_SIZE = (416, 416, 192)
+MRI_DEFAULT_PIXDIM = (1.0, 1.0, 2.0)
+MRI_DEFAULT_A_MIN = 0.0
+MRI_DEFAULT_A_MAX = 0.0  # Dynamic (placeholder)
+
+# PET Defines
+# SUV typically 0-10 or 0-20, but can be higher.
+PET_DEFAULT_SPATIAL_SIZE = (384, 384, 192)
+PET_DEFAULT_PIXDIM = (2.0, 2.0, 3.0)  # Lower res usually
+PET_DEFAULT_A_MIN = 0.0
+PET_DEFAULT_A_MAX = 15.0  # Reasonable SUV max default
+PET_DEFAULT_B_MIN = 0.0
+PET_DEFAULT_B_MAX = 1.0
+
+# X-Ray Defines (2D)
+XRAY_DEFAULT_SPATIAL_SIZE = (768, 768, -1)
+XRAY_DEFAULT_PIXDIM = (0.5, 0.5, -1.0)  # High res in plane
+XRAY_DEFAULT_A_MIN = 0.0
+XRAY_DEFAULT_A_MAX = 255.0  # Assuming 8-bit usually, but handled dynamically preferred
+XRAY_DEFAULT_B_MIN = 0.0
+XRAY_DEFAULT_B_MAX = 1.0
+
+# Ultrasound Defines
+US_DEFAULT_SPATIAL_SIZE = (768, 768, -1)  # Often 2D, sometimes 3D
+US_DEFAULT_PIXDIM = (0.5, 0.5, -1.0)
+US_DEFAULT_A_MIN = 0.0
+US_DEFAULT_A_MAX = 255.0
+US_DEFAULT_B_MIN = 0.0
+US_DEFAULT_B_MAX = 1.0
+
 DEPTH_PATCH_SIZE = 16
 PATCH_SIZE = 16
 
 
-def _require_monai() -> None:
+def _require_monai():
     try:
-        import monai  # noqa: F401
+        import monai.transforms
+
+        return monai.transforms
     except Exception as e:  # pragma: no cover
         raise ImportError(
             "MONAI is required for medical imaging preprocessing. Install with: pip install monai nibabel"
         ) from e
+
+
+class PermuteImage(_require_monai().MapTransform):
+    def __init__(self, keys=["image"], allow_missing_keys=False):
+        super().__init__(keys, allow_missing_keys)
+
+    def __call__(self, data):
+        # ensure the image only has one channel
+        if data["image"].shape[0] != 1:
+            data["image"] = data["image"][0:1]
+        data["image"] = data["image"].permute(0, 3, 1, 2)  # (C, D, H, W)
+        return data
+
+
+def _get_base_transforms(
+    spatial_size: tuple[int, int, int],
+    patch_size: int,
+    intensity_transform,
+    pixdim: tuple[float, float, float] | None = None,
+    use_3d_orientation: bool = True,
+    resize_mode: str = "crop",  # "crop" or "resize"
+):
+    """Refactored base transform builder."""
+    t = _require_monai()
+
+    transforms_list = [
+        t.LoadImaged(keys=["image"], reader="ITKReader", ensure_channel_first=True),
+    ]
+
+    # if use_3d_orientation:
+    #     transforms_list.append(t.Orientationd(keys=["image"], axcodes="RAS"))
+
+    if pixdim:
+        transforms_list.append(t.Spacingd(keys=["image"], pixdim=pixdim, mode=("bilinear"), min_pixdim=pixdim))
+
+    # Add specific intensity transform
+    if intensity_transform:
+        transforms_list.append(intensity_transform)
+
+    # Spatial sizing
+    if resize_mode == "crop":
+        transforms_list.append(t.CenterSpatialCropd(keys=["image"], roi_size=list(spatial_size)))
+    elif resize_mode == "resize":
+        transforms_list.append(t.ResizeWithPadOrCropd(keys=["image"], spatial_size=list(spatial_size)))
+
+    transforms_list.append(t.DivisiblePadd(keys=["image"], k=patch_size * 2))
+    transforms_list.append(t.ToTensord(keys=["image"], track_meta=False))
+    transforms_list.append(PermuteImage())
+
+    return t.Compose(transforms_list)
 
 
 def get_ct_transforms(
@@ -49,92 +140,258 @@ def get_ct_transforms(
 
     Returns a transform that produces a tensor with shape (C, D, H, W), where C=1.
     """
-    _require_monai()
-    from monai.transforms import (
-        CenterSpatialCropd,
-        Compose,
-        DivisiblePadd,
-        EnsureChannelFirstd,
-        LoadImaged,
-        MapTransform,
-        Orientationd,
-        ScaleIntensityRanged,
-        Spacingd,
-        ToTensord,
+    t = _require_monai()
+    return _get_base_transforms(
+        spatial_size=spatial_size,
+        patch_size=patch_size,
+        intensity_transform=t.ScaleIntensityRanged(
+            keys=["image"], a_min=a_min, a_max=a_max, b_min=b_min, b_max=b_max, clip=True
+        ),
+        pixdim=pixdim,
+        use_3d_orientation=True,
+        resize_mode="crop",
     )
 
-    class PermuteImage(MapTransform):
-        """Permute the dimensions for VJEPA2 input: (D, C, H, W)."""
 
-        def __init__(self, keys=["image"], allow_missing_keys=False):
-            MapTransform.__init__(self, keys, allow_missing_keys)
-
-        def __call__(self, data):
-            # ensure the image only has one channel
-            if data["image"].shape[0] != 1:
-                data["image"] = data["image"][0:1]
-            data["image"] = data["image"].permute(0, 3, 1, 2)
-            return data
-
-    ct_transforms = Compose(
-        [
-            LoadImaged(keys=["image"]),
-            EnsureChannelFirstd(keys=["image"]),
-            Orientationd(keys=["image"], axcodes="RAS"),
-            Spacingd(keys=["image"], pixdim=pixdim, mode=("bilinear")),
-            ScaleIntensityRanged(keys=["image"], a_min=a_min, a_max=a_max, b_min=b_min, b_max=b_max, clip=True),
-            CenterSpatialCropd(keys=["image"], roi_size=list(spatial_size)),
-            DivisiblePadd(keys=["image"], k=patch_size * 2),
-            ToTensord(keys=["image"], track_meta=False),
-            PermuteImage(),
-        ]
+def get_mri_transforms(
+    spatial_size: tuple[int, int, int] = MRI_DEFAULT_SPATIAL_SIZE,
+    pixdim: tuple[float, float, float] = MRI_DEFAULT_PIXDIM,
+    patch_size: int = PATCH_SIZE,
+    lower_percentile: float = 0.5,
+    upper_percentile: float = 99.5,
+    b_min: float = 0.0,
+    b_max: float = 1.0,
+):
+    """Create a MONAI Compose for MRI preprocessing."""
+    t = _require_monai()
+    return _get_base_transforms(
+        spatial_size=spatial_size,
+        patch_size=patch_size,
+        intensity_transform=t.ScaleIntensityRangePercentilesd(
+            keys=["image"],
+            lower=lower_percentile,
+            upper=upper_percentile,
+            b_min=b_min,
+            b_max=b_max,
+            clip=True,
+            relative=False,
+        ),
+        pixdim=pixdim,
+        use_3d_orientation=True,
+        resize_mode="crop",
     )
-    return ct_transforms
 
 
-def download_nifti_file(nifti_path: str, save_dir: str = "./tmp/") -> str:
-    """Download a NIfTI file from a s3 or r2 object to local temp directory."""
+def get_pet_transforms(
+    spatial_size: tuple[int, int, int] = PET_DEFAULT_SPATIAL_SIZE,
+    pixdim: tuple[float, float, float] = PET_DEFAULT_PIXDIM,
+    patch_size: int = PATCH_SIZE,
+    a_min: float = PET_DEFAULT_A_MIN,
+    a_max: float = PET_DEFAULT_A_MAX,
+    b_min: float = PET_DEFAULT_B_MIN,
+    b_max: float = PET_DEFAULT_B_MAX,
+):
+    """Create a MONAI Compose for PET preprocessing (SUV scaling)."""
+    t = _require_monai()
+    return _get_base_transforms(
+        spatial_size=spatial_size,
+        patch_size=patch_size,
+        intensity_transform=t.ScaleIntensityRanged(
+            keys=["image"], a_min=a_min, a_max=a_max, b_min=b_min, b_max=b_max, clip=True
+        ),
+        pixdim=pixdim,
+        use_3d_orientation=True,
+        resize_mode="crop",
+    )
+
+
+def get_xray_transforms(
+    spatial_size: tuple[int, int] = XRAY_DEFAULT_SPATIAL_SIZE,  # Changed to 2-tuple for XRAY
+    pixdim: tuple[float, float] = XRAY_DEFAULT_PIXDIM,  # Changed to 2-tuple for XRAY
+    patch_size: int = PATCH_SIZE,
+    a_min: float = XRAY_DEFAULT_A_MIN,
+    a_max: float = XRAY_DEFAULT_A_MAX,
+    b_min: float = XRAY_DEFAULT_B_MIN,
+    b_max: float = XRAY_DEFAULT_B_MAX,
+):
+    """Create a MONAI Compose for X-ray preprocessing (2D)."""
+    t = _require_monai()
+    return _get_base_transforms(
+        spatial_size=spatial_size,
+        patch_size=patch_size,
+        intensity_transform=t.ScaleIntensityRanged(
+            keys=["image"], a_min=a_min, a_max=a_max, b_min=b_min, b_max=b_max, clip=True
+        ),
+        pixdim=pixdim,
+        # X-rays are often 2D so we skip 3D orientation/resampling to avoid errors
+        # unless we are sure metadata exists. Since it's often jpeg/png converted or 2D DICOM,
+        # safer to skip.
+        use_3d_orientation=False,
+        resize_mode="resize",  # Resize for Xrays typically
+    )
+
+
+def get_ultrasound_transforms(
+    spatial_size: tuple[int, int] = US_DEFAULT_SPATIAL_SIZE,  # Changed to 2-tuple for US
+    pixdim: tuple[float, float] = US_DEFAULT_PIXDIM,  # Changed to 2-tuple for US
+    patch_size: int = PATCH_SIZE,
+    a_min: float = US_DEFAULT_A_MIN,
+    a_max: float = US_DEFAULT_A_MAX,
+    b_min: float = US_DEFAULT_B_MIN,
+    b_max: float = US_DEFAULT_B_MAX,
+):
+    """Create a MONAI Compose for Ultrasound preprocessing."""
+    # Reuse X-ray logic
+    return get_xray_transforms(
+        spatial_size=spatial_size,
+        pixdim=pixdim,
+        patch_size=patch_size,
+        a_min=a_min,
+        a_max=a_max,
+        b_min=b_min,
+        b_max=b_max,
+    )
+
+
+def get_s3_client():
+    # Fix: Increase connection pool size to handle concurrent threads
+    config = Config(
+        max_pool_connections=MAX_WORKERS + 10,
+        retries={"max_attempts": 3, "mode": "standard"},
+        connect_timeout=5,
+        read_timeout=5,
+    )
+
+    return boto3.client(
+        service_name="s3",
+        endpoint_url=os.getenv("ENDPOINT_URL"),
+        aws_access_key_id=os.getenv("ACCESS_KEY_ID"),
+        aws_secret_access_key=os.getenv("SECRET_ACCESS_KEY"),
+        region_name="auto",
+        config=config,
+    )
+
+
+def download_medical_image(image_path: str, save_dir: str = "./tmp/") -> str:
+    """Download a medical image file from a s3 or r2 object to local temp directory."""
     # get the bucket and object name from the nifti path
     # Parse S3/R2 URL to extract bucket and object key
-    if nifti_path.startswith("s3://") or nifti_path.startswith("r2://"):
+    if image_path.startswith("s3://") or image_path.startswith("r2://"):
         # Remove s3:// prefix and split into bucket and object key
-        path_without_prefix = nifti_path[5:]  # Remove "s3://"
+        path_without_prefix = image_path[5:]  # Remove "s3://"
         bucket, object_name = path_without_prefix.split("/", 1)
     else:
-        raise ValueError(f"Invalid S3/R2 path format: {nifti_path}")
+        # Assume it's a local file if not s3/r2 or raises separate error?
+        # For now, keeping existing logic that raises if it claims to be s3 path but isn't?
+        # Actually original just checked startswith and elsed into raise.
+        raise ValueError(f"Invalid S3/R2 path format: {image_path}")
 
     # create s3 client
-    session = boto3.Session()
-    s3 = session.client("s3")
+    s3 = get_s3_client()
 
     # create save directory if it does not exist
-    if not os.path.exists(save_dir):
-        os.makedirs(save_dir)
+    os.makedirs(save_dir, exist_ok=True)
 
-    # create temp directory and get local file path
     local_path = os.path.join(save_dir, os.path.basename(object_name))
-
-    # download the nifti file from the s3 or r2 object to temp directory
     s3.download_file(bucket, object_name, local_path)
-    return local_path
+
+    if not local_path.endswith((".tar", ".tar.gz", ".tgz")):
+        return local_path
+
+    # extract the file
+    extract_dir = local_path
+    for ext in [".tar.gz", ".tgz", ".tar"]:
+        if local_path.endswith(ext):
+            extract_dir = local_path[: -len(ext)]
+            break
+
+    with tarfile.open(local_path) as f:
+        f.extractall(extract_dir)
+
+    # check if there's 'instances' subfolder, if yes, add this to path
+    if os.path.isdir(os.path.join(extract_dir, "instances")):
+        extract_dir = os.path.join(extract_dir, "instances")
+
+    return extract_dir
 
 
-def preprocess_ct_nifti(
-    nifti_path: str,
-    spatial_size: tuple[int, int, int] = CT_DEFAULT_SPATIAL_SIZE,
-    pixdim: tuple[float, float, float] = CT_DEFAULT_PIXDIM,
-    a_min: float = CT_DEFAULT_A_MIN,
-    a_max: float = CT_DEFAULT_A_MAX,
-    b_min: float = CT_DEFAULT_B_MIN,
-    b_max: float = CT_DEFAULT_B_MAX,
+def preprocess_image(
+    image_path: str,
+    modality: str = "CT",
+    spatial_size: tuple[int, int, int] | None = None,
+    pixdim: tuple[float, float, float] | None = None,
+    a_min: float | None = None,
+    a_max: float | None = None,
+    b_min: float | None = None,
+    b_max: float | None = None,
     depth_patch_size: int = 16,
     patch_size: int = 16,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Load and preprocess a CT NIfTI file to VJEPA2-ready shape [1, C, D, H, W]."""
-    transforms = get_ct_transforms(
-        spatial_size=spatial_size, pixdim=pixdim, a_min=a_min, a_max=a_max, b_min=b_min, b_max=b_max
-    )
-    data_dict = {"image": nifti_path}
+    """Load and preprocess a medical image file to VJEPA2-ready shape [1, C, D, H, W].
+
+    Supported modalities: CT, MRI, PET, XRAY, ULTRASOUND.
+    """
+    modality = modality.upper()
+
+    # Set defaults based on modality if not provided
+    if modality == "CT":
+        fn = get_ct_transforms
+        spatial_size = spatial_size or CT_DEFAULT_SPATIAL_SIZE
+        pixdim = pixdim or CT_DEFAULT_PIXDIM
+        a_min = a_min if a_min is not None else CT_DEFAULT_A_MIN
+        a_max = a_max if a_max is not None else CT_DEFAULT_A_MAX
+        b_min = b_min if b_min is not None else CT_DEFAULT_B_MIN
+        b_max = b_max if b_max is not None else CT_DEFAULT_B_MAX
+
+        transforms = fn(spatial_size=spatial_size, pixdim=pixdim, a_min=a_min, a_max=a_max, b_min=b_min, b_max=b_max)
+
+    elif modality == "MRI":
+        fn = get_mri_transforms
+        spatial_size = spatial_size or MRI_DEFAULT_SPATIAL_SIZE
+        pixdim = pixdim or MRI_DEFAULT_PIXDIM
+        # MRI uses percentiles usually, so a_min/a_max might be percentile args or ignored
+        # For simplicity in this interface, we pass them as specific named args if we want custom percentiles
+        # or use defaults. The wrapper below doesn't support custom percentiles easily via a_min/a_max
+        # unless we remap them. Let's assume defaults for now.
+        transforms = fn(spatial_size=spatial_size, pixdim=pixdim)
+
+    elif modality == "PET":
+        fn = get_pet_transforms
+        spatial_size = spatial_size or PET_DEFAULT_SPATIAL_SIZE
+        pixdim = pixdim or PET_DEFAULT_PIXDIM
+        a_min = a_min if a_min is not None else PET_DEFAULT_A_MIN
+        a_max = a_max if a_max is not None else PET_DEFAULT_A_MAX
+        b_min = b_min if b_min is not None else PET_DEFAULT_B_MIN
+        b_max = b_max if b_max is not None else PET_DEFAULT_B_MAX
+
+        transforms = fn(spatial_size=spatial_size, pixdim=pixdim, a_min=a_min, a_max=a_max, b_min=b_min, b_max=b_max)
+
+    elif modality == "XRAY":
+        fn = get_xray_transforms
+        spatial_size = spatial_size or XRAY_DEFAULT_SPATIAL_SIZE
+        pixdim = pixdim or XRAY_DEFAULT_PIXDIM
+        a_min = a_min if a_min is not None else XRAY_DEFAULT_A_MIN
+        a_max = a_max if a_max is not None else XRAY_DEFAULT_A_MAX
+        b_min = b_min if b_min is not None else XRAY_DEFAULT_B_MIN
+        b_max = b_max if b_max is not None else XRAY_DEFAULT_B_MAX
+
+        transforms = fn(spatial_size=spatial_size, pixdim=pixdim, a_min=a_min, a_max=a_max, b_min=b_min, b_max=b_max)
+
+    elif modality == "ULTRASOUND" or modality == "US":
+        fn = get_ultrasound_transforms
+        spatial_size = spatial_size or US_DEFAULT_SPATIAL_SIZE
+        pixdim = pixdim or US_DEFAULT_PIXDIM
+        a_min = a_min if a_min is not None else US_DEFAULT_A_MIN
+        a_max = a_max if a_max is not None else US_DEFAULT_A_MAX
+        b_min = b_min if b_min is not None else US_DEFAULT_B_MIN
+        b_max = b_max if b_max is not None else US_DEFAULT_B_MAX
+
+        transforms = fn(spatial_size=spatial_size, pixdim=pixdim, a_min=a_min, a_max=a_max, b_min=b_min, b_max=b_max)
+
+    else:
+        raise ValueError(f"Unsupported modality: {modality}")
+
+    data_dict = {"image": image_path}
     transformed = transforms(data_dict)
     volume_dc_hw = transformed["image"]  # (C, D, H, W)
     if volume_dc_hw.dim() != 4:
@@ -167,35 +424,52 @@ def preprocess_ct_nifti(
     # The last four dimensions (C, d_p, p, p) are flattened into the feature dimension.
     patches = patches.contiguous().view(-1, volume_dc_hw.shape[0] * depth_patch_size * patch_size * patch_size)
     return patches, grid_thw
+    # return volume_dc_hw, grid_thw
 
 
 def fetch_medical_volume(ele: dict) -> tuple[torch.Tensor, torch.Tensor]:
     """Convenience wrapper to preprocess medical volumes.
 
     Supported keys:
-      - "nifti_path" or "image": path to .nii/.nii.gz CT volume
+      - "nifti_path" or "image": path to image file
+      - "modality": CT, MRI, PET, XRAY, ULTRASOUND (default: CT)
       - Optional overrides: spatial_size, pixdim, a_min, a_max, b_min, b_max
-
-    Returns: tuple[torch.Tensor, torch.Tensor]
     """
-    nifti_path = ele.get("nifti_path") or ele.get("image")
-    if not isinstance(nifti_path, str):
-        raise ValueError("fetch_medical_volume expects 'nifti_path' or 'image' string path to a NIfTI file")
-    spatial_size = tuple(ele.get("spatial_size", CT_DEFAULT_SPATIAL_SIZE))
-    pixdim = tuple(ele.get("pixdim", CT_DEFAULT_PIXDIM))
-    a_min = float(ele.get("a_min", CT_DEFAULT_A_MIN))
-    a_max = float(ele.get("a_max", CT_DEFAULT_A_MAX))
-    b_min = float(ele.get("b_min", CT_DEFAULT_B_MIN))
-    b_max = float(ele.get("b_max", CT_DEFAULT_B_MAX))
+    image_path = ele.get("nifti_path") or ele.get("image")
+    if not isinstance(image_path, str):
+        raise ValueError("fetch_medical_volume expects 'nifti_path' or 'image' string path")
+
+    modality = ele.get("modality", "CT")
+
+    # helper to parse tuple or None
+    def get_tuple(key, default):
+        val = ele.get(key)
+        return tuple(val) if val else default
+
+    spatial_size = get_tuple("spatial_size", None)
+    pixdim = get_tuple("pixdim", None)
+
+    a_min = ele.get("a_min")
+    a_max = ele.get("a_max")
+    b_min = ele.get("b_min")
+    b_max = ele.get("b_max")
+
+    # Cast to float only if they are not None
+    a_min = float(a_min) if a_min is not None else None
+    a_max = float(a_max) if a_max is not None else None
+    b_min = float(b_min) if b_min is not None else None
+    b_max = float(b_max) if b_max is not None else None
+
     depth_patch_size = int(ele.get("depth_patch_size", DEPTH_PATCH_SIZE))
     patch_size = int(ele.get("patch_size", PATCH_SIZE))
 
-    # download nifti file if it is not a local path
-    if not os.path.exists(nifti_path):
+    # download file if it is not a local path
+    if not os.path.exists(image_path):
         with tempfile.TemporaryDirectory() as temp_dir:
-            nifti_path = download_nifti_file(nifti_path, temp_dir)
-            patches, grid_thw = preprocess_ct_nifti(
-                nifti_path=nifti_path,
+            image_path = download_medical_image(image_path, temp_dir)
+            volume_dc_hw, grid_thw = preprocess_image(
+                image_path=image_path,
+                modality=modality,
                 spatial_size=spatial_size,
                 pixdim=pixdim,
                 a_min=a_min,
@@ -206,8 +480,9 @@ def fetch_medical_volume(ele: dict) -> tuple[torch.Tensor, torch.Tensor]:
                 patch_size=patch_size,
             )
     else:
-        patches, grid_thw = preprocess_ct_nifti(
-            nifti_path=nifti_path,
+        volume_dc_hw, grid_thw = preprocess_image(
+            image_path=image_path,
+            modality=modality,
             spatial_size=spatial_size,
             pixdim=pixdim,
             a_min=a_min,
@@ -217,7 +492,7 @@ def fetch_medical_volume(ele: dict) -> tuple[torch.Tensor, torch.Tensor]:
             depth_patch_size=depth_patch_size,
             patch_size=patch_size,
         )
-    return patches, grid_thw
+    return volume_dc_hw, grid_thw
 
 
 def extract_imaging_info(conversations: list[dict] | list[list[dict]]) -> list[dict]:
@@ -236,9 +511,7 @@ def extract_imaging_info(conversations: list[dict] | list[list[dict]]) -> list[d
             if isinstance(message.get("content"), list):
                 for ele in message["content"]:
                     path_val = ele.get("image") or ele.get("nifti_path")
-                    if isinstance(path_val, str) and (path_val.endswith(".nii") or path_val.endswith(".nii.gz")):
-                        imaging_infos.append(ele)
-                    elif ele.get("type", "") in ("image", "nifti"):
+                    if isinstance(path_val, str):
                         imaging_infos.append(ele)
     return imaging_infos
 
@@ -248,7 +521,7 @@ def process_imaging_info(
 ) -> tuple[torch.Tensor, torch.Tensor] | None:
     """Process medical imaging info into preprocessed tensors.
 
-    Returns a list of tensors with shape [1, D, C, H, W] or None if no entries.
+    Returns a list of tensors with shape [1, C, D, H, W] or None if no entries.
     """
     imaging_infos = extract_imaging_info(conversations)
     volume_inputs: list[torch.Tensor] = []
@@ -260,3 +533,27 @@ def process_imaging_info(
     if len(volume_inputs) == 0:
         return None
     return torch.cat(volume_inputs, dim=0), torch.stack(grid_thws)
+
+
+if __name__ == "__main__":
+    # file_path = "data/xray_example/example_1.dcm"
+    file1 = "r2://smb-data-prod/gradient/dicomweb/studies/1.2.826.0.1.3680043.8.498.11318887186448904885228249819142750264/series/1.2.826.0.1.3680043.8.498.17171269982065139666555735710442928128.tar"
+    # file2 = "r2://smb-data-prod/gradient/dicomweb/studies/1.2.826.0.1.3680043.8.498.10000144221960596779241590677301771452/series/1.2.826.0.1.3680043.8.498.40304657147469568739423973737018003972.tar"
+
+    conversations = [
+        {
+            "content": [
+                {
+                    "image": file1,
+                    "modality": "CT",
+                },
+                # {
+                #     "image": file2,
+                #     "modality": "CT",
+                # },
+            ]
+        }
+    ]
+    volumes, grid_thws = process_imaging_info(conversations)
+    print(volumes.shape)
+    print(grid_thws)

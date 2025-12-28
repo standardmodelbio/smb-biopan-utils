@@ -3,7 +3,6 @@
 # Copyright © 2025 Standard Model Biomedicine, Inc. <zach@standardmodel.bio>
 #
 # Distributed under terms of the Apache License 2.0 license.
-
 import torch
 
 from .ehr_process import process_ehr_info
