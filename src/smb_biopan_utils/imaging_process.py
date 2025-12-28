@@ -533,27 +533,3 @@ def process_imaging_info(
     if len(volume_inputs) == 0:
         return None
     return torch.cat(volume_inputs, dim=0), torch.stack(grid_thws)
-
-
-if __name__ == "__main__":
-    # file_path = "data/xray_example/example_1.dcm"
-    file1 = "r2://smb-data-prod/gradient/dicomweb/studies/1.2.826.0.1.3680043.8.498.11318887186448904885228249819142750264/series/1.2.826.0.1.3680043.8.498.17171269982065139666555735710442928128.tar"
-    # file2 = "r2://smb-data-prod/gradient/dicomweb/studies/1.2.826.0.1.3680043.8.498.10000144221960596779241590677301771452/series/1.2.826.0.1.3680043.8.498.40304657147469568739423973737018003972.tar"
-
-    conversations = [
-        {
-            "content": [
-                {
-                    "image": file1,
-                    "modality": "CT",
-                },
-                # {
-                #     "image": file2,
-                #     "modality": "CT",
-                # },
-            ]
-        }
-    ]
-    volumes, grid_thws = process_imaging_info(conversations)
-    print(volumes.shape)
-    print(grid_thws)
