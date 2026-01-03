@@ -96,12 +96,13 @@ def _get_base_transforms(
     pixdim: tuple[float, float, float] | None = None,
     use_3d_orientation: bool = True,
     resize_mode: str = "crop",  # "crop" or "resize"
+    reader: str = "ITKReader",
 ):
     """Refactored base transform builder."""
     t = _require_monai()
 
     transforms_list = [
-        t.LoadImaged(keys=["image"], reader="ITKReader", ensure_channel_first=True),
+        t.LoadImaged(keys=["image"], reader=reader, ensure_channel_first=True),
     ]
 
     # if use_3d_orientation:
@@ -135,6 +136,7 @@ def get_ct_transforms(
     a_max: float = CT_DEFAULT_A_MAX,
     b_min: float = CT_DEFAULT_B_MIN,
     b_max: float = CT_DEFAULT_B_MAX,
+    reader: str = "ITKReader",
 ):
     """Create a MONAI Compose for CT NIfTI preprocessing.
 
@@ -150,6 +152,7 @@ def get_ct_transforms(
         pixdim=pixdim,
         use_3d_orientation=True,
         resize_mode="crop",
+        reader=reader,
     )
 
 
@@ -161,6 +164,7 @@ def get_mri_transforms(
     upper_percentile: float = 99.5,
     b_min: float = 0.0,
     b_max: float = 1.0,
+    reader: str = "ITKReader",
 ):
     """Create a MONAI Compose for MRI preprocessing."""
     t = _require_monai()
@@ -179,6 +183,7 @@ def get_mri_transforms(
         pixdim=pixdim,
         use_3d_orientation=True,
         resize_mode="crop",
+        reader=reader,
     )
 
 
@@ -190,6 +195,7 @@ def get_pet_transforms(
     a_max: float = PET_DEFAULT_A_MAX,
     b_min: float = PET_DEFAULT_B_MIN,
     b_max: float = PET_DEFAULT_B_MAX,
+    reader: str = "ITKReader",
 ):
     """Create a MONAI Compose for PET preprocessing (SUV scaling)."""
     t = _require_monai()
@@ -202,6 +208,7 @@ def get_pet_transforms(
         pixdim=pixdim,
         use_3d_orientation=True,
         resize_mode="crop",
+        reader=reader,
     )
 
 
@@ -213,6 +220,7 @@ def get_xray_transforms(
     a_max: float = XRAY_DEFAULT_A_MAX,
     b_min: float = XRAY_DEFAULT_B_MIN,
     b_max: float = XRAY_DEFAULT_B_MAX,
+    reader: str = "ITKReader",
 ):
     """Create a MONAI Compose for X-ray preprocessing (2D)."""
     t = _require_monai()
@@ -228,6 +236,7 @@ def get_xray_transforms(
         # safer to skip.
         use_3d_orientation=False,
         resize_mode="resize",  # Resize for Xrays typically
+        reader=reader,
     )
 
 
@@ -239,6 +248,7 @@ def get_ultrasound_transforms(
     a_max: float = US_DEFAULT_A_MAX,
     b_min: float = US_DEFAULT_B_MIN,
     b_max: float = US_DEFAULT_B_MAX,
+    reader: str = "ITKReader",
 ):
     """Create a MONAI Compose for Ultrasound preprocessing."""
     # Reuse X-ray logic
@@ -250,6 +260,7 @@ def get_ultrasound_transforms(
         a_max=a_max,
         b_min=b_min,
         b_max=b_max,
+        reader=reader,
     )
 
 
@@ -332,6 +343,13 @@ def preprocess_image(
     Supported modalities: CT, MRI, PET, XRAY, ULTRASOUND.
     """
     modality = modality.upper()
+    reader = (
+        "ITKReader"
+        if os.path.isdir(image_path)
+        else "NibabelReader"
+        if image_path.endswith(".nii.gz")
+        else "ITKReader"
+    )
 
     # Set defaults based on modality if not provided
     if modality == "CT":
@@ -343,7 +361,9 @@ def preprocess_image(
         b_min = b_min if b_min is not None else CT_DEFAULT_B_MIN
         b_max = b_max if b_max is not None else CT_DEFAULT_B_MAX
 
-        transforms = fn(spatial_size=spatial_size, pixdim=pixdim, a_min=a_min, a_max=a_max, b_min=b_min, b_max=b_max)
+        transforms = fn(
+            spatial_size=spatial_size, pixdim=pixdim, a_min=a_min, a_max=a_max, b_min=b_min, b_max=b_max, reader=reader
+        )
 
     elif modality == "MRI":
         fn = get_mri_transforms
@@ -353,7 +373,7 @@ def preprocess_image(
         # For simplicity in this interface, we pass them as specific named args if we want custom percentiles
         # or use defaults. The wrapper below doesn't support custom percentiles easily via a_min/a_max
         # unless we remap them. Let's assume defaults for now.
-        transforms = fn(spatial_size=spatial_size, pixdim=pixdim)
+        transforms = fn(spatial_size=spatial_size, pixdim=pixdim, reader=reader)
 
     elif modality == "PET":
         fn = get_pet_transforms
@@ -364,7 +384,9 @@ def preprocess_image(
         b_min = b_min if b_min is not None else PET_DEFAULT_B_MIN
         b_max = b_max if b_max is not None else PET_DEFAULT_B_MAX
 
-        transforms = fn(spatial_size=spatial_size, pixdim=pixdim, a_min=a_min, a_max=a_max, b_min=b_min, b_max=b_max)
+        transforms = fn(
+            spatial_size=spatial_size, pixdim=pixdim, a_min=a_min, a_max=a_max, b_min=b_min, b_max=b_max, reader=reader
+        )
 
     elif modality == "XRAY":
         fn = get_xray_transforms
@@ -375,7 +397,9 @@ def preprocess_image(
         b_min = b_min if b_min is not None else XRAY_DEFAULT_B_MIN
         b_max = b_max if b_max is not None else XRAY_DEFAULT_B_MAX
 
-        transforms = fn(spatial_size=spatial_size, pixdim=pixdim, a_min=a_min, a_max=a_max, b_min=b_min, b_max=b_max)
+        transforms = fn(
+            spatial_size=spatial_size, pixdim=pixdim, a_min=a_min, a_max=a_max, b_min=b_min, b_max=b_max, reader=reader
+        )
 
     elif modality == "ULTRASOUND" or modality == "US":
         fn = get_ultrasound_transforms
@@ -386,7 +410,9 @@ def preprocess_image(
         b_min = b_min if b_min is not None else US_DEFAULT_B_MIN
         b_max = b_max if b_max is not None else US_DEFAULT_B_MAX
 
-        transforms = fn(spatial_size=spatial_size, pixdim=pixdim, a_min=a_min, a_max=a_max, b_min=b_min, b_max=b_max)
+        transforms = fn(
+            spatial_size=spatial_size, pixdim=pixdim, a_min=a_min, a_max=a_max, b_min=b_min, b_max=b_max, reader=reader
+        )
 
     else:
         raise ValueError(f"Unsupported modality: {modality}")
